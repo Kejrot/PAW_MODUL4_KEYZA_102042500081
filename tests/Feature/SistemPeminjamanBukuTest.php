@@ -6,8 +6,10 @@ use App\Models\Anggota;
 use App\Models\Buku;
 use App\Models\Peminjaman;
 use App\Models\User;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class SistemPeminjamanBukuTest extends TestCase
@@ -62,6 +64,18 @@ class SistemPeminjamanBukuTest extends TestCase
         $this->get('/peminjaman')->assertRedirect('/login');
     }
 
+    public function test_mahasiswa_cannot_access_admin_routes(): void
+    {
+        $mahasiswa = User::create([
+            'name' => 'Mahasiswa',
+            'email' => 'mahasiswa@example.com',
+            'password' => Hash::make('password'),
+            'role' => 'mahasiswa',
+        ]);
+
+        $this->actingAs($mahasiswa)->get('/dashboard')->assertForbidden();
+    }
+
     public function test_admin_can_logout(): void
     {
         $response = $this->actingAs($this->admin)->post('/logout');
@@ -88,6 +102,68 @@ class SistemPeminjamanBukuTest extends TestCase
             'judul' => 'Clean Code',
             'stok' => 5,
         ]);
+    }
+
+    public function test_book_cover_is_stored_replaced_and_deleted_with_book(): void
+    {
+        Storage::fake('public');
+
+        $bookData = [
+            'judul' => 'Cover Test',
+            'penulis' => 'Penulis',
+            'penerbit' => 'Penerbit',
+            'tahun_terbit' => 2024,
+            'stok' => 2,
+        ];
+
+        $this->actingAs($this->admin)->post('/buku', $bookData + [
+            'cover' => UploadedFile::fake()->image('cover-lama.jpg'),
+        ])->assertRedirect('/buku');
+
+        $buku = Buku::where('judul', 'Cover Test')->firstOrFail();
+        $coverLama = $buku->cover;
+        Storage::disk('public')->assertExists($coverLama);
+
+        $this->actingAs($this->admin)->put("/buku/{$buku->id}", $bookData + [
+            'cover' => UploadedFile::fake()->image('cover-baru.jpg'),
+        ])->assertRedirect('/buku');
+
+        $coverBaru = $buku->fresh()->cover;
+        $this->assertNotSame($coverLama, $coverBaru);
+        Storage::disk('public')->assertMissing($coverLama);
+        Storage::disk('public')->assertExists($coverBaru);
+
+        $this->actingAs($this->admin)->delete("/buku/{$buku->id}")->assertRedirect('/buku');
+        Storage::disk('public')->assertMissing($coverBaru);
+    }
+
+    public function test_public_catalog_filters_books_and_preserves_filters_in_pagination(): void
+    {
+        foreach (range(1, 9) as $number) {
+            Buku::create([
+                'judul' => sprintf('Laravel Buku %02d', $number),
+                'penulis' => 'Penulis',
+                'penerbit' => 'Penerbit',
+                'tahun_terbit' => 2024,
+                'stok' => 2,
+            ]);
+        }
+
+        Buku::create([
+            'judul' => 'Laravel Habis',
+            'penulis' => 'Penulis',
+            'penerbit' => 'Penerbit',
+            'tahun_terbit' => 2024,
+            'stok' => 0,
+        ]);
+
+        $response = $this->get('/?search=Laravel&status=tersedia&sort=judul_asc');
+
+        $response->assertOk()
+            ->assertSee('Laravel Buku 01')
+            ->assertDontSee('Laravel Habis')
+            ->assertSee('ditemukan <strong>9</strong> buku', false)
+            ->assertSee('search=Laravel&amp;status=tersedia&amp;sort=judul_asc', false);
     }
 
     public function test_create_book_validation_fails_on_empty_fields(): void
